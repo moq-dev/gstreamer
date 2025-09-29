@@ -243,13 +243,12 @@ impl HangSrc {
 							let buffer_mut = buffer.get_mut().unwrap();
 
 							// Make timestamps relative to the first frame for proper playback
-							let pts = if reference.is_none() {
+							let pts = if let Some(reference_ts) = reference {
+								let timestamp: std::time::Duration = frame.timestamp - reference_ts;
+								gst::ClockTime::from_nseconds(timestamp.as_nanos() as _)
+							} else {
 								reference = Some(frame.timestamp);
 								gst::ClockTime::ZERO
-							} else {
-								let reference_ts = reference.unwrap();
-								let timestamp = frame.timestamp - reference_ts;
-								gst::ClockTime::from_nseconds(timestamp.as_nanos() as _)
 							};
 							buffer_mut.set_pts(Some(pts));
 
@@ -348,13 +347,12 @@ impl HangSrc {
 							let buffer_mut = buffer.get_mut().unwrap();
 
 							// Make timestamps relative to the first frame for proper playback
-							let pts = if reference.is_none() {
+							let pts = if let Some(reference_ts) = reference {
+								let timestamp: std::time::Duration = frame.timestamp - reference_ts;
+								gst::ClockTime::from_nseconds(timestamp.as_nanos() as _)
+							} else {
 								reference = Some(frame.timestamp);
 								gst::ClockTime::ZERO
-							} else {
-								let reference_ts = reference.unwrap();
-								let timestamp = frame.timestamp - reference_ts;
-								gst::ClockTime::from_nseconds(timestamp.as_nanos() as _)
 							};
 							buffer_mut.set_pts(Some(pts));
 
