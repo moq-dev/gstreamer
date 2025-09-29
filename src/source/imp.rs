@@ -233,38 +233,50 @@ impl HangSrc {
 
 			self.obj().add_pad(&srcpad).expect("Failed to add pad");
 
-			let mut reference = None;
-
 			// Push to the srcpad in a background task.
+			let mut reference = None;
 			tokio::spawn(async move {
-				// TODO don't panic on error
-				while let Some(frame) = track.read().await.expect("failed to read frame") {
-					let mut buffer = gst::Buffer::from_slice(frame.payload);
-					let buffer_mut = buffer.get_mut().unwrap();
+				loop {
+					match track.read().await {
+						Ok(Some(frame)) => {
+							let mut buffer = gst::Buffer::from_slice(frame.payload);
+							let buffer_mut = buffer.get_mut().unwrap();
 
-					// Make the timestamps relative to the first frame
-					let timestamp = if let Some(reference) = reference {
-						frame.timestamp - reference
-					} else {
-						reference = Some(frame.timestamp);
-						frame.timestamp
-					};
+							// Make timestamps relative to the first frame for proper playback
+							let pts = if reference.is_none() {
+								reference = Some(frame.timestamp);
+								gst::ClockTime::ZERO
+							} else {
+								let reference_ts = reference.unwrap();
+								let timestamp = frame.timestamp - reference_ts;
+								gst::ClockTime::from_nseconds(timestamp.as_nanos() as _)
+							};
+							buffer_mut.set_pts(Some(pts));
 
-					let pts = gst::ClockTime::from_nseconds(timestamp.as_nanos() as _);
-					buffer_mut.set_pts(Some(pts));
+							let mut flags = buffer_mut.flags();
+							match frame.keyframe {
+								true => flags.remove(gst::BufferFlags::DELTA_UNIT),
+								false => flags.insert(gst::BufferFlags::DELTA_UNIT),
+							};
 
-					let mut flags = buffer_mut.flags();
-					match frame.keyframe {
-						true => flags.remove(gst::BufferFlags::DELTA_UNIT),
-						false => flags.insert(gst::BufferFlags::DELTA_UNIT),
-					};
+							buffer_mut.set_flags(flags);
 
-					buffer_mut.set_flags(flags);
+							gst::info!(CAT, "pushing sample: {:?}", buffer);
 
-					gst::info!(CAT, "pushing sample: {:?}", buffer);
-
-					if let Err(err) = srcpad.push(buffer) {
-						gst::warning!(CAT, "Failed to push sample: {:?}", err);
+							if let Err(err) = srcpad.push(buffer) {
+								gst::warning!(CAT, "Failed to push sample: {:?}", err);
+							}
+						}
+						Ok(None) => {
+							// Stream ended normally
+							gst::info!(CAT, "Stream ended normally");
+							break;
+						}
+						Err(e) => {
+							// Handle connection errors gracefully
+							gst::warning!(CAT, "Failed to read frame: {:?}", e);
+							break;
+						}
 					}
 				}
 			});
@@ -326,34 +338,46 @@ impl HangSrc {
 
 			self.obj().add_pad(&srcpad).expect("Failed to add pad");
 
-			let mut reference = None;
-
 			// Push to the srcpad in a background task.
+			let mut reference = None;
 			tokio::spawn(async move {
-				// TODO don't panic on error
-				while let Some(frame) = track.read().await.expect("failed to read frame") {
-					let mut buffer = gst::Buffer::from_slice(frame.payload);
-					let buffer_mut = buffer.get_mut().unwrap();
+				loop {
+					match track.read().await {
+						Ok(Some(frame)) => {
+							let mut buffer = gst::Buffer::from_slice(frame.payload);
+							let buffer_mut = buffer.get_mut().unwrap();
 
-					// Make the timestamps relative to the first frame
-					let timestamp = if let Some(reference) = reference {
-						frame.timestamp - reference
-					} else {
-						reference = Some(frame.timestamp);
-						frame.timestamp
-					};
+							// Make timestamps relative to the first frame for proper playback
+							let pts = if reference.is_none() {
+								reference = Some(frame.timestamp);
+								gst::ClockTime::ZERO
+							} else {
+								let reference_ts = reference.unwrap();
+								let timestamp = frame.timestamp - reference_ts;
+								gst::ClockTime::from_nseconds(timestamp.as_nanos() as _)
+							};
+							buffer_mut.set_pts(Some(pts));
 
-					let pts = gst::ClockTime::from_nseconds(timestamp.as_nanos() as _);
-					buffer_mut.set_pts(Some(pts));
+							let mut flags = buffer_mut.flags();
+							flags.remove(gst::BufferFlags::DELTA_UNIT);
+							buffer_mut.set_flags(flags);
 
-					let mut flags = buffer_mut.flags();
-					flags.remove(gst::BufferFlags::DELTA_UNIT);
-					buffer_mut.set_flags(flags);
+							gst::info!(CAT, "pushing sample: {:?}", buffer);
 
-					gst::info!(CAT, "pushing sample: {:?}", buffer);
-
-					if let Err(err) = srcpad.push(buffer) {
-						gst::warning!(CAT, "Failed to push sample: {:?}", err);
+							if let Err(err) = srcpad.push(buffer) {
+								gst::warning!(CAT, "Failed to push sample: {:?}", err);
+							}
+						}
+						Ok(None) => {
+							// Stream ended normally
+							gst::info!(CAT, "Stream ended normally");
+							break;
+						}
+						Err(e) => {
+							// Handle connection errors gracefully
+							gst::warning!(CAT, "Failed to read frame: {:?}", e);
+							break;
+						}
 					}
 				}
 			});
