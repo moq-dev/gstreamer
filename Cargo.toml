@@ -20,9 +20,9 @@ path = "src/lib.rs"
 
 [dependencies]
 # Using published versions from crates.io instead of workspace
-hang = "0.5"
-moq-lite = "0.6"
-moq-native = "0.7"
+hang = "0.6"
+moq-lite = "0.8"
+moq-native = "0.8"
 
 anyhow = { version = "1", features = ["backtrace"] }
 gst = { package = "gstreamer", version = "0.23" }

@@ -191,194 +191,200 @@ impl HangSrc {
 		// TODO handle catalog updates
 		let catalog = catalog.next().await?.context("no catalog found")?.clone();
 
-		for video in catalog.video {
-			let mut track: hang::TrackConsumer = broadcast.subscribe_track(&video.track).into();
+		if let Some(video) = catalog.video {
+			for (track_name, config) in video.renditions {
+				let track_ref = hang::moq_lite::Track::new(&track_name);
+				let mut track: hang::TrackConsumer = broadcast.subscribe_track(&track_ref).into();
 
-			let caps = match video.config.codec {
-				hang::catalog::VideoCodec::H264(_) => {
-					let builder = gst::Caps::builder("video/x-h264")
-						//.field("width", video.resolution.width)
-						//.field("height", video.resolution.height)
-						.field("alignment", "au");
+				let caps = match config.codec {
+					hang::catalog::VideoCodec::H264(_) => {
+						let builder = gst::Caps::builder("video/x-h264")
+							//.field("width", video.resolution.width)
+							//.field("height", video.resolution.height)
+							.field("alignment", "au");
 
-					if let Some(description) = video.config.description {
-						builder
-							.field("stream-format", "avc")
-							.field("codec_data", gst::Buffer::from_slice(description.clone()))
-							.build()
-					} else {
-						builder.field("stream-format", "annexb").build()
+						if let Some(description) = config.description {
+							builder
+								.field("stream-format", "avc")
+								.field("codec_data", gst::Buffer::from_slice(description.clone()))
+								.build()
+						} else {
+							builder.field("stream-format", "annexb").build()
+						}
 					}
-				}
-				_ => unimplemented!(),
-			};
+					_ => unimplemented!(),
+				};
 
-			gst::info!(CAT, "caps: {:?}", caps);
+				gst::info!(CAT, "caps: {:?}", caps);
 
-			let templ = self.obj().element_class().pad_template("video_%u").unwrap();
+				let templ = self.obj().element_class().pad_template("video_%u").unwrap();
 
-			let srcpad = gst::Pad::builder_from_template(&templ).name(&video.track.name).build();
-			srcpad.set_active(true).unwrap();
+				let srcpad = gst::Pad::builder_from_template(&templ).name(&track_name).build();
+				srcpad.set_active(true).unwrap();
 
-			let stream_start = gst::event::StreamStart::builder(&video.track.name)
-				.group_id(gst::GroupId::next())
-				.build();
-			srcpad.push_event(stream_start);
+				let stream_start = gst::event::StreamStart::builder(&track_name)
+					.group_id(gst::GroupId::next())
+					.build();
+				srcpad.push_event(stream_start);
 
-			let caps_evt = gst::event::Caps::new(&caps);
-			srcpad.push_event(caps_evt);
+				let caps_evt = gst::event::Caps::new(&caps);
+				srcpad.push_event(caps_evt);
 
-			let segment = gst::event::Segment::new(&gst::FormattedSegment::<gst::ClockTime>::new());
-			srcpad.push_event(segment);
+				let segment = gst::event::Segment::new(&gst::FormattedSegment::<gst::ClockTime>::new());
+				srcpad.push_event(segment);
 
-			self.obj().add_pad(&srcpad).expect("Failed to add pad");
+				self.obj().add_pad(&srcpad).expect("Failed to add pad");
 
-			// Push to the srcpad in a background task.
-			let mut reference = None;
-			tokio::spawn(async move {
-				loop {
-					match track.read().await {
-						Ok(Some(frame)) => {
-							let mut buffer = gst::Buffer::from_slice(frame.payload);
-							let buffer_mut = buffer.get_mut().unwrap();
+				// Push to the srcpad in a background task.
+				let mut reference = None;
+				tokio::spawn(async move {
+					loop {
+						match track.read().await {
+							Ok(Some(frame)) => {
+								let mut buffer = gst::Buffer::from_slice(frame.payload);
+								let buffer_mut = buffer.get_mut().unwrap();
 
-							// Make timestamps relative to the first frame for proper playback
-							let pts = if let Some(reference_ts) = reference {
-								let timestamp: std::time::Duration = frame.timestamp - reference_ts;
-								gst::ClockTime::from_nseconds(timestamp.as_nanos() as _)
-							} else {
-								reference = Some(frame.timestamp);
-								gst::ClockTime::ZERO
-							};
-							buffer_mut.set_pts(Some(pts));
+								// Make timestamps relative to the first frame for proper playback
+								let pts = if let Some(reference_ts) = reference {
+									let timestamp: std::time::Duration = frame.timestamp - reference_ts;
+									gst::ClockTime::from_nseconds(timestamp.as_nanos() as _)
+								} else {
+									reference = Some(frame.timestamp);
+									gst::ClockTime::ZERO
+								};
+								buffer_mut.set_pts(Some(pts));
 
-							let mut flags = buffer_mut.flags();
-							match frame.keyframe {
-								true => flags.remove(gst::BufferFlags::DELTA_UNIT),
-								false => flags.insert(gst::BufferFlags::DELTA_UNIT),
-							};
+								let mut flags = buffer_mut.flags();
+								match frame.keyframe {
+									true => flags.remove(gst::BufferFlags::DELTA_UNIT),
+									false => flags.insert(gst::BufferFlags::DELTA_UNIT),
+								};
 
-							buffer_mut.set_flags(flags);
+								buffer_mut.set_flags(flags);
 
-							gst::info!(CAT, "pushing sample: {:?}", buffer);
+								gst::info!(CAT, "pushing sample: {:?}", buffer);
 
-							if let Err(err) = srcpad.push(buffer) {
-								gst::warning!(CAT, "Failed to push sample: {:?}", err);
+								if let Err(err) = srcpad.push(buffer) {
+									gst::warning!(CAT, "Failed to push sample: {:?}", err);
+								}
+							}
+							Ok(None) => {
+								// Stream ended normally
+								gst::info!(CAT, "Stream ended normally");
+								break;
+							}
+							Err(e) => {
+								// Handle connection errors gracefully
+								gst::warning!(CAT, "Failed to read frame: {:?}", e);
+								break;
 							}
 						}
-						Ok(None) => {
-							// Stream ended normally
-							gst::info!(CAT, "Stream ended normally");
-							break;
-						}
-						Err(e) => {
-							// Handle connection errors gracefully
-							gst::warning!(CAT, "Failed to read frame: {:?}", e);
-							break;
-						}
 					}
-				}
-			});
+				});
+			}
 		}
 
-		for audio in catalog.audio {
-			let mut track: hang::TrackConsumer = broadcast.subscribe_track(&audio.track).into();
+		if let Some(audio) = catalog.audio {
+			for (track_name, config) in audio.renditions {
+				let track_ref = hang::moq_lite::Track::new(&track_name);
+				let mut track: hang::TrackConsumer = broadcast.subscribe_track(&track_ref).into();
 
-			let caps = match &audio.config.codec {
-				hang::catalog::AudioCodec::AAC(_aac) => {
-					let builder = gst::Caps::builder("audio/mpeg")
-						.field("mpegversion", 4)
-						.field("channels", audio.config.channel_count)
-						.field("rate", audio.config.sample_rate);
+				let caps = match &config.codec {
+					hang::catalog::AudioCodec::AAC(_aac) => {
+						let builder = gst::Caps::builder("audio/mpeg")
+							.field("mpegversion", 4)
+							.field("channels", config.channel_count)
+							.field("rate", config.sample_rate);
 
-					if let Some(description) = audio.config.description {
-						builder
-							.field("codec_data", gst::Buffer::from_slice(description.clone()))
-							.field("stream-format", "aac")
-							.build()
-					} else {
-						builder.field("stream-format", "adts").build()
+						if let Some(description) = config.description {
+							builder
+								.field("codec_data", gst::Buffer::from_slice(description.clone()))
+								.field("stream-format", "aac")
+								.build()
+						} else {
+							builder.field("stream-format", "adts").build()
+						}
 					}
-				}
-				hang::catalog::AudioCodec::Opus => {
-					let builder = gst::Caps::builder("audio/x-opus")
-						.field("rate", audio.config.sample_rate)
-						.field("channels", audio.config.channel_count);
+					hang::catalog::AudioCodec::Opus => {
+						let builder = gst::Caps::builder("audio/x-opus")
+							.field("rate", config.sample_rate)
+							.field("channels", config.channel_count);
 
-					if let Some(description) = audio.config.description {
-						builder
-							.field("codec_data", gst::Buffer::from_slice(description.clone()))
-							.field("stream-format", "ogg")
-							.build()
-					} else {
-						builder.field("stream-format", "opus").build()
+						if let Some(description) = config.description {
+							builder
+								.field("codec_data", gst::Buffer::from_slice(description.clone()))
+								.field("stream-format", "ogg")
+								.build()
+						} else {
+							builder.field("stream-format", "opus").build()
+						}
 					}
-				}
-				_ => unimplemented!(),
-			};
+					_ => unimplemented!(),
+				};
 
-			gst::info!(CAT, "caps: {:?}", caps);
+				gst::info!(CAT, "caps: {:?}", caps);
 
-			let templ = self.obj().element_class().pad_template("audio_%u").unwrap();
+				let templ = self.obj().element_class().pad_template("audio_%u").unwrap();
 
-			let srcpad = gst::Pad::builder_from_template(&templ).name(&audio.track.name).build();
-			srcpad.set_active(true).unwrap();
+				let srcpad = gst::Pad::builder_from_template(&templ).name(&track_name).build();
+				srcpad.set_active(true).unwrap();
 
-			let stream_start = gst::event::StreamStart::builder(&audio.track.name)
-				.group_id(gst::GroupId::next())
-				.build();
-			srcpad.push_event(stream_start);
+				let stream_start = gst::event::StreamStart::builder(&track_name)
+					.group_id(gst::GroupId::next())
+					.build();
+				srcpad.push_event(stream_start);
 
-			let caps_evt = gst::event::Caps::new(&caps);
-			srcpad.push_event(caps_evt);
+				let caps_evt = gst::event::Caps::new(&caps);
+				srcpad.push_event(caps_evt);
 
-			let segment = gst::event::Segment::new(&gst::FormattedSegment::<gst::ClockTime>::new());
-			srcpad.push_event(segment);
+				let segment = gst::event::Segment::new(&gst::FormattedSegment::<gst::ClockTime>::new());
+				srcpad.push_event(segment);
 
-			self.obj().add_pad(&srcpad).expect("Failed to add pad");
+				self.obj().add_pad(&srcpad).expect("Failed to add pad");
 
-			// Push to the srcpad in a background task.
-			let mut reference = None;
-			tokio::spawn(async move {
-				loop {
-					match track.read().await {
-						Ok(Some(frame)) => {
-							let mut buffer = gst::Buffer::from_slice(frame.payload);
-							let buffer_mut = buffer.get_mut().unwrap();
+				// Push to the srcpad in a background task.
+				let mut reference = None;
+				tokio::spawn(async move {
+					loop {
+						match track.read().await {
+							Ok(Some(frame)) => {
+								let mut buffer = gst::Buffer::from_slice(frame.payload);
+								let buffer_mut = buffer.get_mut().unwrap();
 
-							// Make timestamps relative to the first frame for proper playback
-							let pts = if let Some(reference_ts) = reference {
-								let timestamp: std::time::Duration = frame.timestamp - reference_ts;
-								gst::ClockTime::from_nseconds(timestamp.as_nanos() as _)
-							} else {
-								reference = Some(frame.timestamp);
-								gst::ClockTime::ZERO
-							};
-							buffer_mut.set_pts(Some(pts));
+								// Make timestamps relative to the first frame for proper playback
+								let pts = if let Some(reference_ts) = reference {
+									let timestamp: std::time::Duration = frame.timestamp - reference_ts;
+									gst::ClockTime::from_nseconds(timestamp.as_nanos() as _)
+								} else {
+									reference = Some(frame.timestamp);
+									gst::ClockTime::ZERO
+								};
+								buffer_mut.set_pts(Some(pts));
 
-							let mut flags = buffer_mut.flags();
-							flags.remove(gst::BufferFlags::DELTA_UNIT);
-							buffer_mut.set_flags(flags);
+								let mut flags = buffer_mut.flags();
+								flags.remove(gst::BufferFlags::DELTA_UNIT);
+								buffer_mut.set_flags(flags);
 
-							gst::info!(CAT, "pushing sample: {:?}", buffer);
+								gst::info!(CAT, "pushing sample: {:?}", buffer);
 
-							if let Err(err) = srcpad.push(buffer) {
-								gst::warning!(CAT, "Failed to push sample: {:?}", err);
+								if let Err(err) = srcpad.push(buffer) {
+									gst::warning!(CAT, "Failed to push sample: {:?}", err);
+								}
+							}
+							Ok(None) => {
+								// Stream ended normally
+								gst::info!(CAT, "Stream ended normally");
+								break;
+							}
+							Err(e) => {
+								// Handle connection errors gracefully
+								gst::warning!(CAT, "Failed to read frame: {:?}", e);
+								break;
 							}
 						}
-						Ok(None) => {
-							// Stream ended normally
-							gst::info!(CAT, "Stream ended normally");
-							break;
-						}
-						Err(e) => {
-							// Handle connection errors gracefully
-							gst::warning!(CAT, "Failed to read frame: {:?}", e);
-							break;
-						}
 					}
-				}
-			});
+				});
+			}
 		}
 
 		// We downloaded the catalog and created all the pads.
