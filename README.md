@@ -29,7 +29,7 @@ just relay
 Now you can publish and subscribe to a video:
 ```sh
 # Publish to a localhost moq-relay server
-just pub-gst bbb
+just pub bbb
 
 # Subscribe from a localhost moq-relay server
 just sub bbb

@@ -39,7 +39,7 @@ download name url:
 	fi
 
 # Publish a video using gstreamer to the localhost relay server
-pub-gst broadcast: (download "bbb" "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4")
+pub broadcast: (download "bbb" "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4")
 	# Build the plugins
 	cargo build
 
