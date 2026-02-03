@@ -34,15 +34,15 @@ struct State {
 }
 
 #[derive(Default)]
-pub struct HangSink {
+pub struct MoqSink {
 	settings: Mutex<Settings>,
 	state: Arc<Mutex<State>>,
 }
 
 #[glib::object_subclass]
-impl ObjectSubclass for HangSink {
-	const NAME: &'static str = "HangSink";
-	type Type = super::HangSink;
+impl ObjectSubclass for MoqSink {
+	const NAME: &'static str = "MoqSink";
+	type Type = super::MoqSink;
 	type ParentType = gst_base::BaseSink;
 
 	fn new() -> Self {
@@ -50,7 +50,7 @@ impl ObjectSubclass for HangSink {
 	}
 }
 
-impl ObjectImpl for HangSink {
+impl ObjectImpl for MoqSink {
 	fn properties() -> &'static [glib::ParamSpec] {
 		static PROPERTIES: Lazy<Vec<glib::ParamSpec>> = Lazy::new(|| {
 			vec![
@@ -95,9 +95,9 @@ impl ObjectImpl for HangSink {
 	}
 }
 
-impl GstObjectImpl for HangSink {}
+impl GstObjectImpl for MoqSink {}
 
-impl ElementImpl for HangSink {
+impl ElementImpl for MoqSink {
 	fn metadata() -> Option<&'static gst::subclass::ElementMetadata> {
 		static ELEMENT_METADATA: Lazy<gst::subclass::ElementMetadata> = Lazy::new(|| {
 			gst::subclass::ElementMetadata::new(
@@ -126,7 +126,7 @@ impl ElementImpl for HangSink {
 	}
 }
 
-impl BaseSinkImpl for HangSink {
+impl BaseSinkImpl for MoqSink {
 	fn start(&self) -> Result<(), gst::ErrorMessage> {
 		let _guard = RUNTIME.enter();
 		self.setup()
@@ -164,7 +164,7 @@ impl BaseSinkImpl for HangSink {
 	}
 }
 
-impl HangSink {
+impl MoqSink {
 	fn setup(&self) -> anyhow::Result<()> {
 		let settings = self.settings.lock().unwrap();
 

@@ -10,7 +10,7 @@ use std::sync::LazyLock;
 use std::sync::Mutex;
 
 static CAT: Lazy<gst::DebugCategory> =
-	Lazy::new(|| gst::DebugCategory::new("hang-src", gst::DebugColorFlags::empty(), Some("Hang Source Element")));
+	Lazy::new(|| gst::DebugCategory::new("moq-src", gst::DebugColorFlags::empty(), Some("MoQ Source Element")));
 
 pub static RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
 	tokio::runtime::Builder::new_multi_thread()
@@ -28,14 +28,14 @@ struct Settings {
 }
 
 #[derive(Default)]
-pub struct HangSrc {
+pub struct MoqSrc {
 	settings: Mutex<Settings>,
 }
 
 #[glib::object_subclass]
-impl ObjectSubclass for HangSrc {
-	const NAME: &'static str = "HangSrc";
-	type Type = super::HangSrc;
+impl ObjectSubclass for MoqSrc {
+	const NAME: &'static str = "MoqSrc";
+	type Type = super::MoqSrc;
 	type ParentType = gst::Bin;
 
 	fn new() -> Self {
@@ -43,10 +43,10 @@ impl ObjectSubclass for HangSrc {
 	}
 }
 
-impl GstObjectImpl for HangSrc {}
-impl BinImpl for HangSrc {}
+impl GstObjectImpl for MoqSrc {}
+impl BinImpl for MoqSrc {}
 
-impl ObjectImpl for HangSrc {
+impl ObjectImpl for MoqSrc {
 	fn properties() -> &'static [glib::ParamSpec] {
 		static PROPERTIES: Lazy<Vec<glib::ParamSpec>> = Lazy::new(|| {
 			vec![
@@ -91,7 +91,7 @@ impl ObjectImpl for HangSrc {
 	}
 }
 
-impl ElementImpl for HangSrc {
+impl ElementImpl for MoqSrc {
 	fn metadata() -> Option<&'static gst::subclass::ElementMetadata> {
 		static ELEMENT_METADATA: Lazy<gst::subclass::ElementMetadata> = Lazy::new(|| {
 			gst::subclass::ElementMetadata::new(
@@ -156,7 +156,7 @@ impl ElementImpl for HangSrc {
 	}
 }
 
-impl HangSrc {
+impl MoqSrc {
 	async fn setup(&self) -> anyhow::Result<()> {
 		let (client, url, name) = {
 			let settings = self.settings.lock().unwrap();
