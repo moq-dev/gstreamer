@@ -1,8 +1,8 @@
 [package]
-name = "hang-gst"
+name = "moq-gst"
 description = "Media over QUIC - Gstreamer plugin"
 authors = ["Luke Curley"]
-repository = "https://github.com/kixelated/hang-gst"
+repository = "https://github.com/moq-dev/gstreamer"
 license = "MIT OR Apache-2.0"
 
 version = "0.2.2"
@@ -12,7 +12,7 @@ keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 [lib]
-name = "gsthang"
+name = "gstmoq"
 crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 

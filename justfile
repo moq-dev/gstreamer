@@ -46,7 +46,7 @@ pub broadcast: (download "bbb" "http://commondatastorage.googleapis.com/gtv-vide
 	# Run gstreamer and pipe the output to our plugin
 	GST_PLUGIN_PATH="${PWD}/target/debug${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}" \
 	gst-launch-1.0 -v -e multifilesrc location="dev/bbb.fmp4" loop=true ! qtdemux name=demux \
-		demux.video_0 ! h264parse ! queue ! identity sync=true ! isofmp4mux name=mux chunk-duration=1 fragment-duration=1 ! hangsink url="$URL" broadcast="{{broadcast}}" tls-disable-verify=true \
+		demux.video_0 ! h264parse ! queue ! identity sync=true ! isofmp4mux name=mux chunk-duration=1 fragment-duration=1 ! moqsink url="$URL" broadcast="{{broadcast}}" tls-disable-verify=true \
 		demux.audio_0 ! aacparse ! queue ! mux.
 
 # Subscribe to a video using gstreamer
@@ -57,7 +57,7 @@ sub broadcast:
 	# Run gstreamer and pipe the output to our plugin
 	# This will render the video to the screen
 	GST_PLUGIN_PATH="${PWD}/target/debug${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}" \
-	gst-launch-1.0 -v -e hangsrc url="$URL" broadcast="{{broadcast}}" tls-disable-verify=true ! decodebin ! videoconvert ! autovideosink
+	gst-launch-1.0 -v -e moqsrc url="$URL" broadcast="{{broadcast}}" tls-disable-verify=true ! decodebin ! videoconvert ! autovideosink
 
 # Run the CI checks
 check $RUSTFLAGS="-D warnings":
