@@ -1479,7 +1479,6 @@ dependencies = [
  "moq-lite",
  "moq-mux",
  "moq-native",
- "once_cell",
  "tokio",
  "tracing",
  "tracing-subscriber",

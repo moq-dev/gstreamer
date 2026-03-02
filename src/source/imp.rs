@@ -3,14 +3,13 @@ use gst::glib;
 use gst::prelude::*;
 use gst::subclass::prelude::*;
 
-use once_cell::sync::Lazy;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 
-static CAT: Lazy<gst::DebugCategory> =
-	Lazy::new(|| gst::DebugCategory::new("moq-src", gst::DebugColorFlags::empty(), Some("MoQ Source Element")));
+static CAT: LazyLock<gst::DebugCategory> =
+	LazyLock::new(|| gst::DebugCategory::new("moq-src", gst::DebugColorFlags::empty(), Some("MoQ Source Element")));
 
-pub static RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
+pub static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 	tokio::runtime::Builder::new_multi_thread()
 		.enable_all()
 		.worker_threads(1)
@@ -28,6 +27,8 @@ struct Settings {
 #[derive(Default)]
 pub struct MoqSrc {
 	settings: Mutex<Settings>,
+	session: Mutex<Option<moq_lite::Session>>,
+	tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 #[glib::object_subclass]
@@ -46,7 +47,7 @@ impl BinImpl for MoqSrc {}
 
 impl ObjectImpl for MoqSrc {
 	fn properties() -> &'static [glib::ParamSpec] {
-		static PROPERTIES: Lazy<Vec<glib::ParamSpec>> = Lazy::new(|| {
+		static PROPERTIES: LazyLock<Vec<glib::ParamSpec>> = LazyLock::new(|| {
 			vec![
 				glib::ParamSpecString::builder("url")
 					.nick("Source URL")
@@ -91,7 +92,7 @@ impl ObjectImpl for MoqSrc {
 
 impl ElementImpl for MoqSrc {
 	fn metadata() -> Option<&'static gst::subclass::ElementMetadata> {
-		static ELEMENT_METADATA: Lazy<gst::subclass::ElementMetadata> = Lazy::new(|| {
+		static ELEMENT_METADATA: LazyLock<gst::subclass::ElementMetadata> = LazyLock::new(|| {
 			gst::subclass::ElementMetadata::new(
 				"MoQ Src",
 				"Source/Network/MoQ",
@@ -172,7 +173,8 @@ impl MoqSrc {
 			(client, url, name, origin_consumer)
 		};
 
-		let _session = client.connect(url).await?;
+		let session = client.connect(url).await?;
+		*self.session.lock().unwrap() = Some(session);
 
 		let broadcast = origin_consumer
 			.consume_broadcast(&name)
@@ -232,7 +234,7 @@ impl MoqSrc {
 
 				// Push to the srcpad in a background task.
 				let mut reference = None;
-				tokio::spawn(async move {
+				let handle = tokio::spawn(async move {
 					loop {
 						match track.read().await {
 							Ok(Some(frame)) => {
@@ -277,6 +279,7 @@ impl MoqSrc {
 						}
 					}
 				});
+				self.tasks.lock().unwrap().push(handle);
 			}
 		}
 
@@ -342,7 +345,7 @@ impl MoqSrc {
 
 				// Push to the srcpad in a background task.
 				let mut reference = None;
-				tokio::spawn(async move {
+				let handle = tokio::spawn(async move {
 					loop {
 						match track.read().await {
 							Ok(Some(frame)) => {
@@ -383,6 +386,7 @@ impl MoqSrc {
 						}
 					}
 				});
+				self.tasks.lock().unwrap().push(handle);
 			}
 		}
 
@@ -393,6 +397,9 @@ impl MoqSrc {
 	}
 
 	fn cleanup(&self) {
-		// TODO kill spawned tasks
+		for task in self.tasks.lock().unwrap().drain(..) {
+			task.abort();
+		}
+		*self.session.lock().unwrap() = None;
 	}
 }
