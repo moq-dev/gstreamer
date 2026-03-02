@@ -3,8 +3,8 @@
 # Using Just: https://github.com/casey/just?tab=readme-ov-file#installation
 
 export RUST_BACKTRACE := "1"
-export RUST_LOG := "info"
-export URL := "http://localhost:4443"
+export RUST_LOG := env_var_or_default("RUST_LOG", "info")
+export URL := "http://localhost:4443/anon"
 #export GST_DEBUG:="*:4"
 
 # List all of the available commands.
@@ -44,10 +44,11 @@ pub broadcast: (download "bbb" "http://commondatastorage.googleapis.com/gtv-vide
 	cargo build
 
 	# Run gstreamer and pipe the output to our plugin
-	GST_PLUGIN_PATH="${PWD}/target/debug${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}" \
+	GST_PLUGIN_PATH_1_0="${PWD}/target/debug${GST_PLUGIN_PATH_1_0:+:$GST_PLUGIN_PATH_1_0}" \
 	gst-launch-1.0 -v -e multifilesrc location="dev/bbb.fmp4" loop=true ! qtdemux name=demux \
-		demux.video_0 ! h264parse ! queue ! identity sync=true ! isofmp4mux name=mux chunk-duration=1 fragment-duration=1 ! moqsink url="$URL" broadcast="{{broadcast}}" tls-disable-verify=true \
-		demux.audio_0 ! aacparse ! queue ! mux.
+		demux.video_0 ! h264parse ! queue ! identity sync=true ! mux.video_0 \
+		demux.audio_0 ! aacparse ! queue ! mux.audio_0 \
+		moqsink name=mux url="$URL" broadcast="{{broadcast}}" tls-disable-verify=true
 
 # Subscribe to a video using gstreamer
 sub broadcast:
@@ -56,7 +57,7 @@ sub broadcast:
 
 	# Run gstreamer and pipe the output to our plugin
 	# This will render the video to the screen
-	GST_PLUGIN_PATH="${PWD}/target/debug${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}" \
+	GST_PLUGIN_PATH_1_0="${PWD}/target/debug${GST_PLUGIN_PATH_1_0:+:$GST_PLUGIN_PATH_1_0}" \
 	gst-launch-1.0 -v -e moqsrc url="$URL" broadcast="{{broadcast}}" tls-disable-verify=true ! decodebin ! videoconvert ! autovideosink
 
 # Run the CI checks

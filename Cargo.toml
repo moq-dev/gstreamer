@@ -28,7 +28,6 @@ moq-native = "0.13.1"
 anyhow = { version = "1", features = ["backtrace"] }
 bytes = "1"
 gst = { package = "gstreamer", version = "0.23" }
-gst-base = { package = "gstreamer-base", version = "0.23" }
 #gst-app = { package = "gstreamer-app", version = "0.23", features = ["v1_20"] }
 
 tokio = { version = "1", features = ["full"] }

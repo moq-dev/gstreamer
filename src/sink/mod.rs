@@ -4,7 +4,7 @@ use gst::prelude::*;
 mod imp;
 
 glib::wrapper! {
-	pub struct MoqSink(ObjectSubclass<imp::MoqSink>) @extends gst_base::BaseSink, gst::Element, gst::Object;
+	pub struct MoqSink(ObjectSubclass<imp::MoqSink>) @extends gst::Element, gst::Object;
 }
 
 pub fn register(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
