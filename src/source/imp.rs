@@ -543,6 +543,8 @@ fn spawn_track_pump(
 				frame = track.read_frame() => {
 					match frame {
 						Ok(Some(frame)) => {
+							//TODO: Think about performance here. This is an O(n) copy.
+							//		It might not be possible given the buffer is from MoQ.
 							let mut buffer = gst::Buffer::from_slice(frame.payload.into_iter().flatten().collect::<Vec<_>>());
 							let buffer_mut = buffer.get_mut().unwrap();
 

@@ -1,205 +1,312 @@
-use anyhow::Context as _;
+#![allow(dead_code)]
+
+//! Reference implementation of `MoqSink` mirroring the refactored source
+//! element. This sketch keeps network I/O inside an async session controller
+//! and pushes buffers to it via bounded channels so the GStreamer streaming
+//! thread never blocks on QUIC or CMAF parsing.
+
+use std::sync::{LazyLock, Mutex};
+
+use anyhow::{Context, Result};
 use bytes::BytesMut;
 use gst::glib;
 use gst::prelude::*;
 use gst::subclass::prelude::*;
 use gst_base::subclass::prelude::*;
+use once_cell::sync::Lazy;
+use tokio::sync::{mpsc, watch};
+use url::Url;
 
 use hang::moq_lite;
 
-use once_cell::sync::Lazy;
-use std::sync::Arc;
-use std::sync::Mutex;
-use url::Url;
-
-pub static RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
-	tokio::runtime::Builder::new_multi_thread()
-		.enable_all()
-		.worker_threads(1)
-		.build()
-		.unwrap()
+static RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(4)
+        .build()
+        .expect("spawn tokio runtime")
 });
 
-#[derive(Default, Clone)]
+static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
+    gst::DebugCategory::new(
+        "moq-sink-ref",
+        gst::DebugColorFlags::empty(),
+        Some("MoQ Sink (refactor)"),
+    )
+});
+
+#[derive(Debug, Clone, Default)]
 struct Settings {
-	pub url: Option<String>,
-	pub broadcast: Option<String>,
-	pub tls_disable_verify: bool,
+    url: Option<String>,
+    broadcast: Option<String>,
+    tls_disable_verify: bool,
 }
 
-#[derive(Default)]
-struct State {
-	pub media: Option<hang::import::Fmp4>,
-	pub buffer: BytesMut,
+#[derive(Debug, Clone)]
+struct ResolvedSettings {
+    url: Url,
+    broadcast: String,
+    tls_disable_verify: bool,
+}
+
+impl TryFrom<Settings> for ResolvedSettings {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Settings) -> Result<Self> {
+        Ok(Self {
+            url: Url::parse(value.url.as_ref().context("url property is required")?)?,
+            broadcast: value
+                .broadcast
+                .as_ref()
+                .context("broadcast property is required")?
+                .clone(),
+            tls_disable_verify: value.tls_disable_verify,
+        })
+    }
+}
+
+struct SessionHandle {
+    sender: mpsc::Sender<BufferPayload>,
+    shutdown: watch::Sender<bool>,
+    join: tokio::task::JoinHandle<()>,
+}
+
+impl SessionHandle {
+    fn stop(self) {
+        let _ = self.shutdown.send(true);
+        let join = self.join;
+        RUNTIME.spawn(async move {
+            if let Err(err) = join.await {
+                gst::warning!(CAT, "session task ended with error: {err:?}");
+            }
+        });
+    }
+}
+
+#[derive(Clone, Debug)]
+struct BufferPayload {
+    data: bytes::Bytes,
 }
 
 #[derive(Default)]
 pub struct MoqSink {
-	settings: Mutex<Settings>,
-	state: Arc<Mutex<State>>,
+    settings: Mutex<Settings>,
+    writer: Mutex<Option<mpsc::Sender<BufferPayload>>>,
+    session: Mutex<Option<SessionHandle>>,
 }
 
 #[glib::object_subclass]
 impl ObjectSubclass for MoqSink {
-	const NAME: &'static str = "MoqSink";
-	type Type = super::MoqSink;
-	type ParentType = gst_base::BaseSink;
+    const NAME: &'static str = "MoqSink";
+    type Type = super::MoqSink;
+    type ParentType = gst_base::BaseSink;
 
-	fn new() -> Self {
-		Self::default()
-	}
+    fn new() -> Self {
+        Self::default()
+    }
 }
 
 impl ObjectImpl for MoqSink {
-	fn properties() -> &'static [glib::ParamSpec] {
-		static PROPERTIES: Lazy<Vec<glib::ParamSpec>> = Lazy::new(|| {
-			vec![
-				glib::ParamSpecString::builder("url")
-					.nick("Source URL")
-					.blurb("Connect to the given URL")
-					.build(),
-				glib::ParamSpecString::builder("broadcast")
-					.nick("Broadcast")
-					.blurb("The name of the broadcast to publish")
-					.build(),
-				glib::ParamSpecBoolean::builder("tls-disable-verify")
-					.nick("TLS disable verify")
-					.blurb("Disable TLS verification")
-					.default_value(false)
-					.build(),
-			]
-		});
-		PROPERTIES.as_ref()
-	}
+    fn properties() -> &'static [glib::ParamSpec] {
+        static PROPS: Lazy<Vec<glib::ParamSpec>> = Lazy::new(|| {
+            vec![
+                glib::ParamSpecString::builder("url")
+                    .nick("Relay URL")
+                    .blurb("Connect and publish to the given URL")
+                    .build(),
+                glib::ParamSpecString::builder("broadcast")
+                    .nick("Broadcast")
+                    .blurb("Broadcast name to publish")
+                    .build(),
+                glib::ParamSpecBoolean::builder("tls-disable-verify")
+                    .nick("TLS Disable Verify")
+                    .blurb("Disable TLS certificate verification")
+                    .default_value(false)
+                    .build(),
+            ]
+        });
+        PROPS.as_ref()
+    }
 
-	fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
-		let mut settings = self.settings.lock().unwrap();
+    fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
+        let mut settings = self.settings.lock().unwrap();
+        match pspec.name() {
+            "url" => settings.url = value.get().unwrap(),
+            "broadcast" => settings.broadcast = value.get().unwrap(),
+            "tls-disable-verify" => settings.tls_disable_verify = value.get().unwrap(),
+            _ => unreachable!(),
+        }
+    }
 
-		match pspec.name() {
-			"url" => settings.url = value.get().unwrap(),
-			"broadcast" => settings.broadcast = value.get().unwrap(),
-			"tls-disable-verify" => settings.tls_disable_verify = value.get().unwrap(),
-			_ => unimplemented!(),
-		}
-	}
-
-	fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
-		let settings = self.settings.lock().unwrap();
-
-		match pspec.name() {
-			"url" => settings.url.to_value(),
-			"broadcast" => settings.broadcast.to_value(),
-			"tls-disable-verify" => settings.tls_disable_verify.to_value(),
-			_ => unimplemented!(),
-		}
-	}
+    fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
+        let settings = self.settings.lock().unwrap();
+        match pspec.name() {
+            "url" => settings.url.to_value(),
+            "broadcast" => settings.broadcast.to_value(),
+            "tls-disable-verify" => settings.tls_disable_verify.to_value(),
+            _ => unreachable!(),
+        }
+    }
 }
 
 impl GstObjectImpl for MoqSink {}
 
 impl ElementImpl for MoqSink {
-	fn metadata() -> Option<&'static gst::subclass::ElementMetadata> {
-		static ELEMENT_METADATA: Lazy<gst::subclass::ElementMetadata> = Lazy::new(|| {
-			gst::subclass::ElementMetadata::new(
-				"MoQ Sink",
-				"Sink/Network/MoQ",
-				"Transmits media over the network via MoQ",
-				"Luke Curley <kixelated@gmail.com>",
-			)
-		});
+    fn metadata() -> Option<&'static gst::subclass::ElementMetadata> {
+        static META: Lazy<gst::subclass::ElementMetadata> = Lazy::new(|| {
+            gst::subclass::ElementMetadata::new(
+                "MoQ Sink (ref)",
+                "Sink/Network/MoQ",
+                "Publishes CMAF fragments over MoQ",
+                "Luke Curley <kixelated@gmail.com>, Steve McFarlin <steve@stevemcfarlin.com>",
+            )
+        });
+        Some(&*META)
+    }
 
-		Some(&*ELEMENT_METADATA)
-	}
-
-	fn pad_templates() -> &'static [gst::PadTemplate] {
-		static PAD_TEMPLATES: Lazy<Vec<gst::PadTemplate>> = Lazy::new(|| {
-			let caps = gst::Caps::builder("video/quicktime")
-				.field("variant", "iso-fragmented")
-				.build();
-
-			let pad_template =
-				gst::PadTemplate::new("sink", gst::PadDirection::Sink, gst::PadPresence::Always, &caps).unwrap();
-
-			vec![pad_template]
-		});
-		PAD_TEMPLATES.as_ref()
-	}
+    fn pad_templates() -> &'static [gst::PadTemplate] {
+        static PAD_TEMPLATES: Lazy<Vec<gst::PadTemplate>> = Lazy::new(|| {
+            let caps = gst::Caps::builder("video/quicktime")
+                .field("variant", "iso-fragmented")
+                .build();
+            let pad_template = gst::PadTemplate::new(
+                "sink",
+                gst::PadDirection::Sink,
+                gst::PadPresence::Always,
+                &caps,
+            )
+            .unwrap();
+            vec![pad_template]
+        });
+        PAD_TEMPLATES.as_ref()
+    }
 }
 
 impl BaseSinkImpl for MoqSink {
-	fn start(&self) -> Result<(), gst::ErrorMessage> {
-		let _guard = RUNTIME.enter();
-		self.setup()
-			.map_err(|e| gst::error_msg!(gst::ResourceError::Failed, ["Failed to connect: {}", e]))
-	}
+    fn start(&self) -> Result<(), gst::ErrorMessage> {
+        self.start_session().map_err(|err| {
+            gst::error_msg!(
+                gst::ResourceError::Failed,
+                ["failed to start MoQ session: {err:#}"]
+            )
+        })
+    }
 
-	fn stop(&self) -> Result<(), gst::ErrorMessage> {
-		Ok(())
-	}
+    fn stop(&self) -> Result<(), gst::ErrorMessage> {
+        self.stop_session();
+        Ok(())
+    }
 
-	fn render(&self, buffer: &gst::Buffer) -> Result<gst::FlowSuccess, gst::FlowError> {
-		let _guard = RUNTIME.enter();
-		let data = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+    fn render(&self, buffer: &gst::Buffer) -> Result<gst::FlowSuccess, gst::FlowError> {
+        let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+        let sender = self
+            .writer
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or(gst::FlowError::Flushing)?;
 
-		let mut state = self.state.lock().unwrap();
+        sender
+            .blocking_send(BufferPayload {
+                data: bytes::Bytes::copy_from_slice(map.as_slice()),
+            })
+            .map_err(|_| gst::FlowError::Flushing)?;
 
-		// Append incoming data to our buffer
-		state.buffer.extend_from_slice(data.as_slice());
-
-		// Take media out temporarily to avoid borrow conflict
-		let mut media = state.media.take().expect("not initialized");
-
-		// Try to decode what we have buffered
-		let result = media.decode(&mut state.buffer);
-
-		// Put media back
-		state.media = Some(media);
-
-		if let Err(e) = result {
-			gst::error!(gst::CAT_DEFAULT, "Failed to decode: {}", e);
-			return Err(gst::FlowError::Error);
-		}
-
-		Ok(gst::FlowSuccess::Ok)
-	}
+        Ok(gst::FlowSuccess::Ok)
+    }
 }
 
 impl MoqSink {
-	fn setup(&self) -> anyhow::Result<()> {
-		let settings = self.settings.lock().unwrap();
+    fn start_session(&self) -> Result<()> {
+        let settings = {
+            let settings = self.settings.lock().unwrap().clone();
+            ResolvedSettings::try_from(settings)?
+        };
 
-		let url = settings.url.as_ref().expect("url is required");
-		let url = Url::parse(url).context("invalid URL")?;
+        let (tx, rx) = mpsc::channel::<BufferPayload>(32);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-		// TODO support TLS certs and other options
-		let client = moq_native::ClientConfig {
-			tls: moq_native::ClientTls {
-				disable_verify: Some(settings.tls_disable_verify),
-				..Default::default()
-			},
-			..Default::default()
-		}
-		.init()?;
+        let join = RUNTIME.spawn(run_session(settings, rx, shutdown_rx));
 
-		RUNTIME.block_on(async move {
-			let session = client.connect(url.clone()).await.expect("failed to connect");
+        *self.writer.lock().unwrap() = Some(tx.clone());
+        *self.session.lock().unwrap() = Some(SessionHandle {
+            sender: tx,
+            shutdown: shutdown_tx,
+            join,
+        });
 
-			let origin = moq_lite::Origin::produce();
-			let broadcast = moq_lite::Broadcast::produce();
+        Ok(())
+    }
 
-			let name = settings.broadcast.as_ref().expect("broadcast is required");
-			origin.producer.publish_broadcast(name, broadcast.consumer);
+    fn stop_session(&self) {
+        if let Some(session) = self.session.lock().unwrap().take() {
+            session.stop();
+        }
+        self.writer.lock().unwrap().take();
+    }
+}
 
-			let _session = moq_lite::Session::connect(session, origin.consumer, None)
-				.await
-				.expect("failed to connect");
+async fn run_session(
+    settings: ResolvedSettings,
+    mut rx: mpsc::Receiver<BufferPayload>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let client = match (moq_native::ClientConfig {
+        tls: moq_native::ClientTls {
+            disable_verify: Some(settings.tls_disable_verify),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .init()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            gst::error!(CAT, "failed to init client: {err:#}");
+            return;
+        }
+    };
 
-			let media = hang::import::Fmp4::new(broadcast.producer.into());
+    let session = match client.connect(settings.url.clone()).await {
+        Ok(session) => session,
+        Err(err) => {
+            gst::error!(CAT, "failed to connect: {err:#}");
+            return;
+        }
+    };
 
-			let mut state = self.state.lock().unwrap();
-			state.media = Some(media);
-		});
+    let origin = moq_lite::Origin::produce();
+    let broadcast = moq_lite::Broadcast::produce();
 
-		Ok(())
-	}
+    origin
+        .producer
+        .publish_broadcast(&settings.broadcast, broadcast.consumer);
+
+    if let Err(err) = moq_lite::Session::connect(session, origin.consumer, None).await {
+        gst::error!(CAT, "session handshake failed: {err:#}");
+        return;
+    }
+
+    let mut importer = hang::import::Fmp4::new(broadcast.producer.into());
+    let mut buffer = BytesMut::new();
+
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                break;
+            }
+            chunk = rx.recv() => {
+                match chunk {
+                    Some(chunk) => {
+                        buffer.extend_from_slice(&chunk.data);
+                        if let Err(err) = importer.decode(&mut buffer) {
+                            gst::warning!(CAT, "failed to decode CMAF fragment: {err:#}");
+                            buffer.clear();
+                        }
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
 }
