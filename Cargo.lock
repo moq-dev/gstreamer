@@ -95,18 +95,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-channel"
-version = "2.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "924ed96dd52d1b75e9c1a3e6275715fd320f5f9439fb5a4a11fa51f4221158d2"
-dependencies = [
- "concurrent-queue",
- "event-listener-strategy",
- "futures-core",
- "pin-project-lite",
-]
-
-[[package]]
 name = "async-compression"
 version = "0.4.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -403,15 +391,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75984efb6ed102a0d42db99afb6c1948f0380d1d91808d5529916e6c08b49d8d"
 
 [[package]]
-name = "concurrent-queue"
-version = "2.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
-dependencies = [
- "crossbeam-utils",
-]
-
-[[package]]
 name = "core-foundation"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -444,12 +423,6 @@ checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
 dependencies = [
  "cfg-if",
 ]
-
-[[package]]
-name = "crossbeam-utils"
-version = "0.8.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
 name = "crypto-common"
@@ -577,27 +550,6 @@ name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
-
-[[package]]
-name = "event-listener"
-version = "5.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
-dependencies = [
- "concurrent-queue",
- "parking",
- "pin-project-lite",
-]
-
-[[package]]
-name = "event-listener-strategy"
-version = "0.5.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
-dependencies = [
- "event-listener",
- "pin-project-lite",
-]
 
 [[package]]
 name = "fastbloom"
@@ -915,9 +867,9 @@ checksum = "ab2f85be813ce08f0569fcd816f256c6f4287c975d69a9a14ceacc309f1de967"
 
 [[package]]
 name = "hang"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f548f7cdc8ec3b9eae085f7b61ff9603d6dc9f09192c5f4b0db4c02577786070"
+checksum = "b5ec88ec64ef18ef985140e13fc4240ae804fa84e5fb8ecab222c42faa78f872"
 dependencies = [
  "buf-list",
  "bytes",
@@ -1453,11 +1405,10 @@ dependencies = [
 
 [[package]]
 name = "moq-lite"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8a4c4e66081bc21067488da13f4131540b38b1cb79fb5176ef4ddacd104786b"
+checksum = "22e2b5cbf085a08eca461384c1242a437c4505f41a315e50eec10d538bb910b1"
 dependencies = [
- "async-channel",
  "bytes",
  "futures",
  "hex",
@@ -1472,12 +1423,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "moq-mux"
-version = "0.2.1"
+name = "moq-msf"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73e2570aa39feef3aa00fa0990862dcdfb44937d3eb9c448c3a4eb1fb8ff43d3"
+checksum = "aebd40d255fbed61325c1b2a2a96332b6183755333d95acee4348cd7733fcce1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_with",
+]
+
+[[package]]
+name = "moq-mux"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04f826b325847e858f4783bc32b2bd9932d3b1b0a1d5ca90108bcecec0b80c4a"
 dependencies = [
  "anyhow",
+ "base64",
  "buf-list",
  "bytes",
  "derive_more",
@@ -1485,6 +1448,7 @@ dependencies = [
  "hang",
  "m3u8-rs",
  "moq-lite",
+ "moq-msf",
  "mp4-atom",
  "num_enum",
  "reqwest",
@@ -1497,9 +1461,9 @@ dependencies = [
 
 [[package]]
 name = "moq-native"
-version = "0.13.1"
+version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9848c21bf5db3f8ff5e5a7d89bf2c567f0eb526390c26d5f66f3fec99a6751a5"
+checksum = "5754d77ace0048c8349d76a2f12f25a093d6f9358e7e24cf86f84202c0d2a547"
 dependencies = [
  "anyhow",
  "clap",
@@ -1566,7 +1530,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1714,12 +1678,6 @@ checksum = "7c26d27bb1aeab65138e4bf7666045169d1717febcc9ff870166be8348b223d0"
 dependencies = [
  "paste",
 ]
-
-[[package]]
-name = "parking"
-version = "2.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f38d5652c16fde515bb1ecef450ab0f6a219d619a7274976324d5e377f7dceba"
 
 [[package]]
 name = "parking_lot"
@@ -1893,7 +1851,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2172,7 +2130,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3109,9 +3067,9 @@ dependencies = [
 
 [[package]]
 name = "web-async"
-version = "0.1.1"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6b2260b739b0e95cf9b78f22a64704af7ed9760ea12baa3745b4b97899dc89a"
+checksum = "f5414b65d9a5094649bb99987bb74db71febfdfa3677b7954a0a05c99d0424e8"
 dependencies = [
  "tokio",
  "tracing",
@@ -3229,7 +3187,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

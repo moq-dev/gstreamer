@@ -180,7 +180,7 @@ impl MoqSrc {
 			.consume_broadcast(&name)
 			.ok_or_else(|| anyhow::anyhow!("Broadcast '{}' not found", name))?;
 
-		let catalog = broadcast.subscribe_track(&hang::Catalog::default_track());
+		let catalog = broadcast.subscribe_track(&hang::Catalog::default_track())?;
 		let mut catalog = hang::CatalogConsumer::new(catalog);
 
 		// TODO handle catalog updates
@@ -189,7 +189,7 @@ impl MoqSrc {
 		{
 			for (track_name, config) in catalog.video.renditions {
 				let track_ref = moq_lite::Track::new(&track_name);
-				let track_consumer = broadcast.subscribe_track(&track_ref);
+				let track_consumer = broadcast.subscribe_track(&track_ref)?;
 				let mut track =
 					hang::container::OrderedConsumer::new(track_consumer, std::time::Duration::from_secs(1));
 
@@ -253,7 +253,8 @@ impl MoqSrc {
 								buffer_mut.set_pts(Some(pts));
 
 								let mut flags = buffer_mut.flags();
-								match frame.keyframe {
+								// First frame in each group is a keyframe
+								match frame.frame == 0 {
 									true => flags.remove(gst::BufferFlags::DELTA_UNIT),
 									false => flags.insert(gst::BufferFlags::DELTA_UNIT),
 								};
@@ -286,7 +287,7 @@ impl MoqSrc {
 		{
 			for (track_name, config) in catalog.audio.renditions {
 				let track_ref = moq_lite::Track::new(&track_name);
-				let track_consumer = broadcast.subscribe_track(&track_ref);
+				let track_consumer = broadcast.subscribe_track(&track_ref)?;
 				let mut track =
 					hang::container::OrderedConsumer::new(track_consumer, std::time::Duration::from_secs(1));
 

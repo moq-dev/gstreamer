@@ -34,7 +34,7 @@ struct PadState {
 struct State {
 	_session: moq_lite::Session,
 	broadcast: moq_lite::BroadcastProducer,
-	catalog: hang::CatalogProducer,
+	catalog: moq_mux::CatalogProducer,
 	pads: HashMap<String, PadState>,
 }
 
@@ -219,8 +219,7 @@ impl MoqSink {
 		let origin = moq_lite::Origin::produce();
 		let mut broadcast = moq_lite::Broadcast::produce();
 		let broadcast_consumer = broadcast.consume();
-		let catalog_track = broadcast.create_track(hang::Catalog::default_track());
-		let catalog = hang::CatalogProducer::new(catalog_track, Default::default());
+		let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
 
 		origin.publish_broadcast(&name, broadcast_consumer);
 
@@ -258,50 +257,62 @@ impl MoqSink {
 		let structure = caps.structure(0).context("empty caps")?;
 		let pad_name = pad.name().to_string();
 
-		let format = match structure.name().as_str() {
-			"video/x-h264" => moq_mux::import::DecoderFormat::Avc3,
-			"video/x-h265" => moq_mux::import::DecoderFormat::Hev1,
-			"video/x-av1" => moq_mux::import::DecoderFormat::Av01,
-			"audio/mpeg" => moq_mux::import::DecoderFormat::Aac,
-			"audio/x-opus" => moq_mux::import::DecoderFormat::Opus,
-			other => anyhow::bail!("unsupported caps: {}", other),
-		};
-
 		let mut state = self.state.lock().unwrap();
 		let state = state.as_mut().context("not connected")?;
 
-		let mut decoder = moq_mux::import::Decoder::new(state.broadcast.clone(), state.catalog.clone(), format);
-
-		// Initialize audio decoders that need external config
-		match format {
-			moq_mux::import::DecoderFormat::Aac => {
+		let decoder: moq_mux::import::Decoder = match structure.name().as_str() {
+			"video/x-h264" => {
+				let mut buf = bytes::Bytes::new();
+				moq_mux::import::Decoder::new(
+					state.broadcast.clone(),
+					state.catalog.clone(),
+					moq_mux::import::DecoderFormat::Avc3,
+					&mut buf,
+				)?
+			}
+			"video/x-h265" => {
+				let mut buf = bytes::Bytes::new();
+				moq_mux::import::Decoder::new(
+					state.broadcast.clone(),
+					state.catalog.clone(),
+					moq_mux::import::DecoderFormat::Hev1,
+					&mut buf,
+				)?
+			}
+			"video/x-av1" => {
+				let mut buf = bytes::Bytes::new();
+				moq_mux::import::Decoder::new(
+					state.broadcast.clone(),
+					state.catalog.clone(),
+					moq_mux::import::DecoderFormat::Av01,
+					&mut buf,
+				)?
+			}
+			"audio/mpeg" => {
 				// aacparse provides AudioSpecificConfig as codec_data in caps
 				let codec_data = structure
 					.get::<gst::Buffer>("codec_data")
 					.context("AAC caps missing codec_data")?;
 				let map = codec_data.map_readable().context("failed to map codec_data buffer")?;
 				let mut data = bytes::Bytes::copy_from_slice(map.as_slice());
-				decoder.initialize(&mut data)?;
+				moq_mux::import::Decoder::new(
+					state.broadcast.clone(),
+					state.catalog.clone(),
+					moq_mux::import::DecoderFormat::Aac,
+					&mut data,
+				)?
 			}
-			moq_mux::import::DecoderFormat::Opus => {
-				// Synthesize OpusHead from caps fields
+			"audio/x-opus" => {
 				let channels: i32 = structure.get("channels").unwrap_or(2);
 				let rate: i32 = structure.get("rate").unwrap_or(48000);
-
-				let mut opus_head = Vec::with_capacity(19);
-				opus_head.extend_from_slice(b"OpusHead");
-				opus_head.push(1); // version
-				opus_head.push(channels as u8);
-				opus_head.extend_from_slice(&0u16.to_le_bytes()); // pre_skip
-				opus_head.extend_from_slice(&(rate as u32).to_le_bytes());
-				opus_head.extend_from_slice(&0i16.to_le_bytes()); // gain
-				opus_head.push(0); // channel mapping family
-
-				let mut data = bytes::Bytes::from(opus_head);
-				decoder.initialize(&mut data)?;
+				let config = moq_mux::import::OpusConfig {
+					sample_rate: rate as u32,
+					channel_count: channels as u32,
+				};
+				moq_mux::import::Opus::new(state.broadcast.clone(), state.catalog.clone(), config)?.into()
 			}
-			_ => {} // Video codecs self-initialize from inline data
-		}
+			other => anyhow::bail!("unsupported caps: {}", other),
+		};
 
 		state.pads.insert(
 			pad_name.clone(),
@@ -311,7 +322,7 @@ impl MoqSink {
 			},
 		);
 
-		gst::info!(CAT, obj = pad, "Configured pad {} with format {:?}", pad_name, format);
+		gst::info!(CAT, obj = pad, "Configured pad {}", pad_name);
 
 		Ok(())
 	}

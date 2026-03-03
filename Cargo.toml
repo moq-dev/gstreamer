@@ -20,10 +20,10 @@ path = "src/lib.rs"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-hang = "0.14.0"
-moq-mux = "0.2.1"
-moq-lite = "0.14.0"
-moq-native = "0.13.1"
+hang = "0.15.0"
+moq-mux = "0.3.0"
+moq-lite = "0.15.0"
+moq-native = "0.13.2"
 
 anyhow = { version = "1", features = ["backtrace"] }
 bytes = "1"
