@@ -254,7 +254,7 @@ impl MoqSrc {
 
 								let mut flags = buffer_mut.flags();
 								// First frame in each group is a keyframe
-								match frame.frame == 0 {
+								match frame.index == 0 {
 									true => flags.remove(gst::BufferFlags::DELTA_UNIT),
 									false => flags.insert(gst::BufferFlags::DELTA_UNIT),
 								};

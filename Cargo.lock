@@ -867,9 +867,9 @@ checksum = "ab2f85be813ce08f0569fcd816f256c6f4287c975d69a9a14ceacc309f1de967"
 
 [[package]]
 name = "hang"
-version = "0.15.0"
+version = "0.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5ec88ec64ef18ef985140e13fc4240ae804fa84e5fb8ecab222c42faa78f872"
+checksum = "10631856b75596bcfca1c82c654fc006d1814d6eded004f6b170bcbddfe4bc97"
 dependencies = [
  "buf-list",
  "bytes",
@@ -1435,9 +1435,9 @@ dependencies = [
 
 [[package]]
 name = "moq-mux"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04f826b325847e858f4783bc32b2bd9932d3b1b0a1d5ca90108bcecec0b80c4a"
+checksum = "b4116c2dc23a07a20c45d3fa54364af190ce678b1d16e93da665589a3735dae0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1851,7 +1851,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2130,7 +2130,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3187,7 +3187,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
