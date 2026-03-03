@@ -45,9 +45,9 @@ pub broadcast: (download "bbb" "http://commondatastorage.googleapis.com/gtv-vide
 
 	# Run gstreamer and pipe the output to our plugin
 	GST_PLUGIN_PATH_1_0="${PWD}/target/debug${GST_PLUGIN_PATH_1_0:+:$GST_PLUGIN_PATH_1_0}" \
-	gst-launch-1.0 -v -e multifilesrc location="dev/bbb.fmp4" loop=true ! qtdemux name=demux \
-		demux.video_0 ! h264parse ! queue ! identity sync=true ! mux.video_0 \
-		demux.audio_0 ! aacparse ! queue ! mux.audio_0 \
+	gst-launch-1.0 -v -e multifilesrc location="dev/bbb.fmp4" loop=true ! parsebin name=parse \
+		parse. ! queue ! identity sync=true ! mux.sink_0 \
+		parse. ! queue ! identity sync=true ! mux.sink_1 \
 		moqsink name=mux url="$URL" broadcast="{{broadcast}}" tls-disable-verify=true
 
 # Subscribe to a video using gstreamer

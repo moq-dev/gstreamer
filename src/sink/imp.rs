@@ -114,47 +114,34 @@ impl ElementImpl for MoqSink {
 
 	fn pad_templates() -> &'static [gst::PadTemplate] {
 		static PAD_TEMPLATES: LazyLock<Vec<gst::PadTemplate>> = LazyLock::new(|| {
-			let mut video_caps = gst::Caps::new_empty();
-			video_caps.merge(
+			let mut caps = gst::Caps::new_empty();
+			// Video
+			caps.merge(
 				gst::Caps::builder("video/x-h264")
 					.field("stream-format", "byte-stream")
 					.field("alignment", "au")
 					.build(),
 			);
-			video_caps.merge(
+			caps.merge(
 				gst::Caps::builder("video/x-h265")
 					.field("stream-format", "byte-stream")
 					.field("alignment", "au")
 					.build(),
 			);
-			video_caps.merge(gst::Caps::builder("video/x-av1").build());
-
-			let video_templ = gst::PadTemplate::new(
-				"video_%u",
-				gst::PadDirection::Sink,
-				gst::PadPresence::Request,
-				&video_caps,
-			)
-			.unwrap();
-
-			let mut audio_caps = gst::Caps::new_empty();
-			audio_caps.merge(
+			caps.merge(gst::Caps::builder("video/x-av1").build());
+			// Audio
+			caps.merge(
 				gst::Caps::builder("audio/mpeg")
 					.field("mpegversion", 4i32)
 					.field("stream-format", "raw")
 					.build(),
 			);
-			audio_caps.merge(gst::Caps::builder("audio/x-opus").build());
+			caps.merge(gst::Caps::builder("audio/x-opus").build());
 
-			let audio_templ = gst::PadTemplate::new(
-				"audio_%u",
-				gst::PadDirection::Sink,
-				gst::PadPresence::Request,
-				&audio_caps,
-			)
-			.unwrap();
+			let templ =
+				gst::PadTemplate::new("sink_%u", gst::PadDirection::Sink, gst::PadPresence::Request, &caps).unwrap();
 
-			vec![video_templ, audio_templ]
+			vec![templ]
 		});
 		PAD_TEMPLATES.as_ref()
 	}
