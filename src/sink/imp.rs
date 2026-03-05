@@ -362,7 +362,7 @@ async fn run_session(settings: ResolvedSettings, mut rx: mpsc::Receiver<ControlM
     let mut broadcast = moq_lite::Broadcast::produce();
     let broadcast_consumer = broadcast.consume();
 
-    let mut catalog = match moq_mux::CatalogProducer::new(&mut broadcast) {
+    let catalog = match moq_mux::CatalogProducer::new(&mut broadcast) {
         Ok(catalog) => catalog,
         Err(err) => {
             gst::error!(CAT, "failed to create catalog: {err:#}");
