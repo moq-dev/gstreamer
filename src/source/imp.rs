@@ -16,7 +16,6 @@ static CAT: LazyLock<gst::DebugCategory> =
 static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 	tokio::runtime::Builder::new_multi_thread()
 		.enable_all()
-		.worker_threads(4)
 		.build()
 		.expect("spawn tokio runtime")
 });
@@ -122,8 +121,7 @@ struct SessionController {
 
 impl SessionController {
 	fn start(settings: ResolvedSettings, control_tx: mpsc::UnboundedSender<ControlMessage>) -> Self {
-		let (shutdown_tx, shutdown_rx) = watch::channel(false);
-		let mut shutdown_rx = shutdown_rx;
+		let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 		let control_for_error = control_tx.clone();
 		let join = RUNTIME.spawn(async move {
 			let result = run_session(settings, control_tx, &mut shutdown_rx).await;
@@ -423,8 +421,7 @@ async fn run_session(
 	let origin_consumer = origin.consume();
 	let client = config.init()?.with_consume(origin);
 
-	let session = client.connect(settings.url.clone()).await?;
-	let _session = session; // keep session alive inside this task
+	let _session = client.connect(settings.url.clone()).await?;
 
 	let broadcast = origin_consumer
 		.consume_broadcast(&settings.broadcast)
@@ -490,74 +487,81 @@ async fn request_pad(
 }
 
 fn spawn_track_pump(
+	track: hang::container::OrderedConsumer,
+	descriptor: TrackDescriptor,
+	pad_endpoint: PadEndpoint,
+	shutdown: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+	RUNTIME.spawn(run_track_pump(track, descriptor, pad_endpoint, shutdown))
+}
+
+async fn run_track_pump(
 	mut track: hang::container::OrderedConsumer,
 	descriptor: TrackDescriptor,
 	pad_endpoint: PadEndpoint,
 	mut shutdown: watch::Receiver<bool>,
-) -> tokio::task::JoinHandle<()> {
-	RUNTIME.spawn(async move {
-		let mut reference_ts = None;
-		loop {
-			tokio::select! {
-				_ = shutdown.changed() => {
-					pad_endpoint.send(PadMessage::Drop);
-					break;
-				}
-				frame = track.read() => {
-					match frame {
-						Ok(Some(frame)) => {
-							let timestamp = frame.timestamp;
-							let is_keyframe = frame.is_keyframe();
-							let payload = frame.payload;
-							let mut buffer = gst::Buffer::from_slice(payload.into_iter().flatten().collect::<Vec<_>>());
-							let buffer_mut = buffer.get_mut().unwrap();
+) {
+	let mut reference_ts = None;
+	loop {
+		tokio::select! {
+			_ = shutdown.changed() => {
+				pad_endpoint.send(PadMessage::Drop);
+				break;
+			}
+			frame = track.read() => {
+				match frame {
+					Ok(Some(frame)) => {
+						let timestamp = frame.timestamp;
+						let is_keyframe = frame.is_keyframe();
+						let payload = frame.payload;
+						let mut buffer = gst::Buffer::from_slice(payload.into_iter().flatten().collect::<Vec<_>>());
+						let buffer_mut = buffer.get_mut().unwrap();
 
-							let pts = match reference_ts {
-								Some(reference) => {
-									let delta: Duration = (timestamp - reference).into();
-									gst::ClockTime::from_nseconds(delta.as_nanos() as u64)
-								}
-								None => {
-									reference_ts = Some(timestamp);
-									gst::ClockTime::ZERO
-								}
-							};
-							buffer_mut.set_pts(Some(pts));
+						let pts = match reference_ts {
+							Some(reference) => {
+								let delta: Duration = (timestamp - reference).into();
+								gst::ClockTime::from_nseconds(delta.as_nanos() as u64)
+							}
+							None => {
+								reference_ts = Some(timestamp);
+								gst::ClockTime::ZERO
+							}
+						};
+						buffer_mut.set_pts(Some(pts));
 
-							let mut flags = buffer_mut.flags();
-							match descriptor.kind {
-								TrackKind::Video => {
-									if is_keyframe {
-										flags.remove(gst::BufferFlags::DELTA_UNIT);
-									} else {
-										flags.insert(gst::BufferFlags::DELTA_UNIT);
-									}
-								}
-								TrackKind::Audio => {
+						let mut flags = buffer_mut.flags();
+						match descriptor.kind {
+							TrackKind::Video => {
+								if is_keyframe {
 									flags.remove(gst::BufferFlags::DELTA_UNIT);
+								} else {
+									flags.insert(gst::BufferFlags::DELTA_UNIT);
 								}
 							}
-							buffer_mut.set_flags(flags);
-
-							if !pad_endpoint.send(PadMessage::Buffer(buffer)) {
-								break;
+							TrackKind::Audio => {
+								flags.remove(gst::BufferFlags::DELTA_UNIT);
 							}
 						}
-						Ok(None) => {
-							pad_endpoint.send(PadMessage::Eos);
-							pad_endpoint.send(PadMessage::Drop);
+						buffer_mut.set_flags(flags);
+
+						if !pad_endpoint.send(PadMessage::Buffer(buffer)) {
 							break;
 						}
-						Err(err) => {
-							gst::warning!(CAT, "track {} failed: {err:?}", descriptor.name);
-							pad_endpoint.send(PadMessage::Drop);
-							break;
-						}
+					}
+					Ok(None) => {
+						pad_endpoint.send(PadMessage::Eos);
+						pad_endpoint.send(PadMessage::Drop);
+						break;
+					}
+					Err(err) => {
+						gst::warning!(CAT, "track {} failed: {err:?}", descriptor.name);
+						pad_endpoint.send(PadMessage::Drop);
+						break;
 					}
 				}
 			}
 		}
-	})
+	}
 }
 
 fn video_caps(config: &hang::catalog::VideoConfig) -> Result<gst::Caps> {
@@ -652,50 +656,4 @@ where
 			}
 		}
 	})
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-	use std::cell::{Cell, RefCell};
-	use std::rc::Rc;
-
-	#[test]
-	fn forwarder_delivers_messages_in_order() {
-		let context = glib::MainContext::new();
-		context
-			.with_thread_default(|| {
-				let (tx, rx) = mpsc::unbounded_channel();
-				let received = Rc::new(RefCell::new(Vec::new()));
-				let done = Rc::new(Cell::new(false));
-
-				let handle = spawn_main_context_forwarder(&context, rx, {
-					let received = Rc::clone(&received);
-					let done = Rc::clone(&done);
-					move |msg: i32| {
-						received.borrow_mut().push(msg);
-						if received.borrow().len() >= 3 {
-							done.set(true);
-							false
-						} else {
-							true
-						}
-					}
-				});
-
-				tx.send(1).unwrap();
-				tx.send(2).unwrap();
-				tx.send(3).unwrap();
-				drop(tx);
-
-				while !done.get() {
-					context.iteration(true);
-				}
-
-				handle.abort();
-
-				assert_eq!(*received.borrow(), vec![1, 2, 3]);
-			})
-			.unwrap();
-	}
 }

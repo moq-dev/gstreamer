@@ -1,10 +1,8 @@
-#![allow(dead_code)]
-
 //! Async-friendly MoqSink that keeps the original dynamic-pad Element
 //! behavior while pushing all network setup and CMAF publishing work into
 //! a Tokio task. The GLib state change thread never blocks, pads still get
 //! requested dynamically, and each pad simply forwards buffers/events to the
-//! background worker via a bounded channel.
+//! background worker via an unbounded channel.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -22,7 +20,6 @@ use hang::moq_lite;
 static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 	tokio::runtime::Builder::new_multi_thread()
 		.enable_all()
-		.worker_threads(4)
 		.build()
 		.expect("spawn tokio runtime")
 });
@@ -67,13 +64,13 @@ impl TryFrom<Settings> for ResolvedSettings {
 
 #[derive(Debug)]
 struct SessionHandle {
-	sender: mpsc::Sender<ControlMessage>,
+	sender: mpsc::UnboundedSender<ControlMessage>,
 	join: tokio::task::JoinHandle<()>,
 }
 
 impl SessionHandle {
 	fn stop(self) {
-		let _ = self.sender.blocking_send(ControlMessage::Shutdown);
+		let _ = self.sender.send(ControlMessage::Shutdown);
 		RUNTIME.spawn(async move {
 			if let Err(err) = self.join.await {
 				gst::warning!(CAT, "session task ended with error: {err:?}");
@@ -246,7 +243,7 @@ impl ElementImpl for MoqSink {
 
 	fn release_pad(&self, pad: &gst::Pad) {
 		if let Some(session) = self.session.lock().unwrap().as_ref() {
-			let _ = session.sender.blocking_send(ControlMessage::DropPad {
+			let _ = session.sender.send(ControlMessage::DropPad {
 				pad_name: pad.name().to_string(),
 			});
 		}
@@ -276,8 +273,12 @@ impl MoqSink {
 			ResolvedSettings::try_from(settings)?
 		};
 
-		let (tx, rx) = mpsc::channel::<ControlMessage>(128);
-		let join = RUNTIME.spawn(run_session(settings, rx));
+		let (tx, rx) = mpsc::unbounded_channel::<ControlMessage>();
+		let join = RUNTIME.spawn(async move {
+			if let Err(err) = run_session(settings, rx).await {
+				gst::error!(CAT, "session error: {err:#}");
+			}
+		});
 
 		*self.session.lock().unwrap() = Some(SessionHandle { sender: tx, join });
 		Ok(())
@@ -303,7 +304,7 @@ impl MoqSink {
 		let data = Bytes::copy_from_slice(map.as_slice());
 
 		sender
-			.blocking_send(ControlMessage::Buffer {
+			.send(ControlMessage::Buffer {
 				pad_name: pad.name().to_string(),
 				data,
 				pts,
@@ -328,7 +329,7 @@ impl MoqSink {
 				};
 
 				if sender
-					.blocking_send(ControlMessage::SetCaps {
+					.send(ControlMessage::SetCaps {
 						pad_name: pad.name().to_string(),
 						caps: caps.caps().to_owned(),
 					})
@@ -344,44 +345,26 @@ impl MoqSink {
 	}
 }
 
-async fn run_session(settings: ResolvedSettings, mut rx: mpsc::Receiver<ControlMessage>) {
+async fn run_session(settings: ResolvedSettings, mut rx: mpsc::UnboundedReceiver<ControlMessage>) -> Result<()> {
 	let mut client_config = moq_native::ClientConfig::default();
 	client_config.tls.disable_verify = Some(settings.tls_disable_verify);
 
-	let client = match client_config.init() {
-		Ok(client) => client,
-		Err(err) => {
-			gst::error!(CAT, "failed to init client: {err:#}");
-			return;
-		}
-	};
+	let client = client_config.init()?;
 
 	let origin = moq_lite::Origin::produce();
 	let mut broadcast = moq_lite::Broadcast::produce();
 	let broadcast_consumer = broadcast.consume();
 
-	let catalog = match moq_mux::CatalogProducer::new(&mut broadcast) {
-		Ok(catalog) => catalog,
-		Err(err) => {
-			gst::error!(CAT, "failed to create catalog: {err:#}");
-			return;
-		}
-	};
+	let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
 
-	if !origin.publish_broadcast(&settings.broadcast, broadcast_consumer) {
-		gst::error!(CAT, "failed to publish broadcast {}", settings.broadcast);
-		return;
-	}
+	anyhow::ensure!(
+		origin.publish_broadcast(&settings.broadcast, broadcast_consumer),
+		"failed to publish broadcast {}",
+		settings.broadcast
+	);
 
 	let client = client.with_publish(origin.consume());
-
-	let session = match client.connect(settings.url.clone()).await {
-		Ok(session) => session,
-		Err(err) => {
-			gst::error!(CAT, "failed to connect: {err:#}");
-			return;
-		}
-	};
+	let session = client.connect(settings.url.clone()).await?;
 
 	let mut runtime = RuntimeState {
 		session,
@@ -408,6 +391,8 @@ async fn run_session(settings: ResolvedSettings, mut rx: mpsc::Receiver<ControlM
 			ControlMessage::Shutdown => break,
 		}
 	}
+
+	Ok(())
 }
 
 fn handle_caps(runtime: &mut RuntimeState, pad_name: String, caps: gst::Caps) -> Result<()> {
