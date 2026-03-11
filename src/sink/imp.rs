@@ -1,29 +1,82 @@
-use anyhow::Context as _;
+//! Async-friendly MoqSink that keeps the original dynamic-pad Element
+//! behavior while pushing all network setup and CMAF publishing work into
+//! a Tokio task. The GLib state change thread never blocks, pads still get
+//! requested dynamically, and each pad simply forwards buffers/events to the
+//! background worker via an unbounded channel.
+
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+
+use anyhow::{Context, Result};
+use bytes::Bytes;
 use gst::glib;
 use gst::prelude::*;
 use gst::subclass::prelude::*;
-
-use std::collections::HashMap;
-use std::sync::LazyLock;
-use std::sync::Mutex;
+use tokio::sync::mpsc;
 use url::Url;
 
-static CAT: LazyLock<gst::DebugCategory> =
-	LazyLock::new(|| gst::DebugCategory::new("moq-sink", gst::DebugColorFlags::empty(), Some("MoQ Sink Element")));
+use hang::moq_lite;
 
-pub static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 	tokio::runtime::Builder::new_multi_thread()
 		.enable_all()
-		.worker_threads(1)
 		.build()
-		.unwrap()
+		.expect("spawn tokio runtime")
 });
 
-#[derive(Default, Clone)]
+static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
+	gst::DebugCategory::new(
+		"moq-sink",
+		gst::DebugColorFlags::empty(),
+		Some("MoQ Sink (async element)"),
+	)
+});
+
+#[derive(Debug, Clone, Default)]
 struct Settings {
-	pub url: Option<String>,
-	pub broadcast: Option<String>,
-	pub tls_disable_verify: bool,
+	url: Option<String>,
+	broadcast: Option<String>,
+	tls_disable_verify: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedSettings {
+	url: Url,
+	broadcast: String,
+	tls_disable_verify: bool,
+}
+
+impl TryFrom<Settings> for ResolvedSettings {
+	type Error = anyhow::Error;
+
+	fn try_from(value: Settings) -> Result<Self> {
+		Ok(Self {
+			url: Url::parse(value.url.as_ref().context("url property is required")?)?,
+			broadcast: value
+				.broadcast
+				.as_ref()
+				.context("broadcast property is required")?
+				.clone(),
+			tls_disable_verify: value.tls_disable_verify,
+		})
+	}
+}
+
+#[derive(Debug)]
+struct SessionHandle {
+	sender: mpsc::UnboundedSender<ControlMessage>,
+	join: tokio::task::JoinHandle<()>,
+}
+
+impl SessionHandle {
+	fn stop(self) {
+		let _ = self.sender.send(ControlMessage::Shutdown);
+		RUNTIME.spawn(async move {
+			if let Err(err) = self.join.await {
+				gst::warning!(CAT, "session task ended with error: {err:?}");
+			}
+		});
+	}
 }
 
 struct PadState {
@@ -31,17 +84,35 @@ struct PadState {
 	reference_pts: Option<gst::ClockTime>,
 }
 
-struct State {
-	_session: moq_lite::Session,
+struct RuntimeState {
+	#[allow(dead_code)]
+	session: moq_lite::Session,
 	broadcast: moq_lite::BroadcastProducer,
 	catalog: moq_mux::CatalogProducer,
 	pads: HashMap<String, PadState>,
 }
 
+#[derive(Debug)]
+enum ControlMessage {
+	SetCaps {
+		pad_name: String,
+		caps: gst::Caps,
+	},
+	Buffer {
+		pad_name: String,
+		data: Bytes,
+		pts: Option<gst::ClockTime>,
+	},
+	DropPad {
+		pad_name: String,
+	},
+	Shutdown,
+}
+
 #[derive(Default)]
 pub struct MoqSink {
 	settings: Mutex<Settings>,
-	state: Mutex<Option<State>>,
+	session: Mutex<Option<SessionHandle>>,
 }
 
 #[glib::object_subclass]
@@ -53,7 +124,7 @@ impl ObjectSubclass for MoqSink {
 
 impl ObjectImpl for MoqSink {
 	fn properties() -> &'static [glib::ParamSpec] {
-		static PROPERTIES: LazyLock<Vec<glib::ParamSpec>> = LazyLock::new(|| {
+		static PROPS: LazyLock<Vec<glib::ParamSpec>> = LazyLock::new(|| {
 			vec![
 				glib::ParamSpecString::builder("url")
 					.nick("Source URL")
@@ -70,28 +141,26 @@ impl ObjectImpl for MoqSink {
 					.build(),
 			]
 		});
-		PROPERTIES.as_ref()
+		PROPS.as_ref()
 	}
 
 	fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
 		let mut settings = self.settings.lock().unwrap();
-
 		match pspec.name() {
 			"url" => settings.url = value.get().unwrap(),
 			"broadcast" => settings.broadcast = value.get().unwrap(),
 			"tls-disable-verify" => settings.tls_disable_verify = value.get().unwrap(),
-			_ => unimplemented!(),
+			_ => unreachable!(),
 		}
 	}
 
 	fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
 		let settings = self.settings.lock().unwrap();
-
 		match pspec.name() {
 			"url" => settings.url.to_value(),
 			"broadcast" => settings.broadcast.to_value(),
 			"tls-disable-verify" => settings.tls_disable_verify.to_value(),
-			_ => unimplemented!(),
+			_ => unreachable!(),
 		}
 	}
 }
@@ -102,20 +171,18 @@ impl ElementImpl for MoqSink {
 	fn metadata() -> Option<&'static gst::subclass::ElementMetadata> {
 		static ELEMENT_METADATA: LazyLock<gst::subclass::ElementMetadata> = LazyLock::new(|| {
 			gst::subclass::ElementMetadata::new(
-				"MoQ Sink",
+				"MoQ Sink (async)",
 				"Sink/Network/MoQ",
-				"Transmits media over the network via MoQ",
-				"Luke Curley <kixelated@gmail.com>",
+				"Transmits media over MoQ",
+				"Luke Curley <kixelated@gmail.com>, Steve McFarlin <steve@stevemcfarlin.com>",
 			)
 		});
-
 		Some(&*ELEMENT_METADATA)
 	}
 
 	fn pad_templates() -> &'static [gst::PadTemplate] {
 		static PAD_TEMPLATES: LazyLock<Vec<gst::PadTemplate>> = LazyLock::new(|| {
 			let mut caps = gst::Caps::new_empty();
-			// Video
 			caps.merge(
 				gst::Caps::builder("video/x-h264")
 					.field("stream-format", "byte-stream")
@@ -129,7 +196,6 @@ impl ElementImpl for MoqSink {
 					.build(),
 			);
 			caps.merge(gst::Caps::builder("video/x-av1").build());
-			// Audio
 			caps.merge(
 				gst::Caps::builder("audio/mpeg")
 					.field("mpegversion", 4i32)
@@ -140,7 +206,6 @@ impl ElementImpl for MoqSink {
 
 			let templ =
 				gst::PadTemplate::new("sink_%u", gst::PadDirection::Sink, gst::PadPresence::Request, &caps).unwrap();
-
 			vec![templ]
 		});
 		PAD_TEMPLATES.as_ref()
@@ -152,24 +217,24 @@ impl ElementImpl for MoqSink {
 		name: Option<&str>,
 		_caps: Option<&gst::Caps>,
 	) -> Option<gst::Pad> {
-		let builder = gst::Pad::builder_from_template(templ)
+		let pad_builder = gst::Pad::builder_from_template(templ)
 			.chain_function(|pad, parent, buffer| {
 				let element = parent
 					.and_then(|p| p.downcast_ref::<super::MoqSink>())
 					.ok_or(gst::FlowError::Error)?;
-				element.imp().sink_chain(pad, buffer)
+				element.imp().forward_buffer(pad, buffer)
 			})
 			.event_function(|pad, parent, event| {
 				let Some(element) = parent.and_then(|p| p.downcast_ref::<super::MoqSink>()) else {
 					return false;
 				};
-				element.imp().sink_event(pad, event)
+				element.imp().forward_event(pad, event)
 			});
 
 		let pad = if let Some(name) = name {
-			builder.name(name).build()
+			pad_builder.name(name).build()
 		} else {
-			builder.build()
+			pad_builder.build()
 		};
 
 		self.obj().add_pad(&pad).ok()?;
@@ -177,9 +242,10 @@ impl ElementImpl for MoqSink {
 	}
 
 	fn release_pad(&self, pad: &gst::Pad) {
-		let pad_name = pad.name().to_string();
-		if let Some(ref mut state) = *self.state.lock().unwrap() {
-			state.pads.remove(&pad_name);
+		if let Some(session) = self.session.lock().unwrap().as_ref() {
+			let _ = session.sender.send(ControlMessage::DropPad {
+				pad_name: pad.name().to_string(),
+			});
 		}
 		let _ = self.obj().remove_pad(pad);
 	}
@@ -187,15 +253,12 @@ impl ElementImpl for MoqSink {
 	fn change_state(&self, transition: gst::StateChange) -> Result<gst::StateChangeSuccess, gst::StateChangeError> {
 		match transition {
 			gst::StateChange::ReadyToPaused => {
-				let _guard = RUNTIME.enter();
-				self.setup().map_err(|e| {
-					gst::error!(CAT, obj = self.obj(), "Failed to setup: {:?}", e);
+				self.start_session().map_err(|err| {
+					gst::error!(CAT, obj = self.obj(), "failed to start session: {err:#}");
 					gst::StateChangeError
 				})?;
 			}
-			gst::StateChange::PausedToReady => {
-				*self.state.lock().unwrap() = None;
-			}
+			gst::StateChange::PausedToReady => self.stop_session(),
 			_ => (),
 		}
 
@@ -204,156 +267,201 @@ impl ElementImpl for MoqSink {
 }
 
 impl MoqSink {
-	fn setup(&self) -> anyhow::Result<()> {
-		let settings = self.settings.lock().unwrap();
+	fn start_session(&self) -> Result<()> {
+		let settings = {
+			let settings = self.settings.lock().unwrap().clone();
+			ResolvedSettings::try_from(settings)?
+		};
 
-		let url = settings.url.as_ref().expect("url is required");
-		let url = Url::parse(url).context("invalid URL")?;
-		let name = settings.broadcast.as_ref().expect("broadcast is required").clone();
+		let (tx, rx) = mpsc::unbounded_channel::<ControlMessage>();
+		let join = RUNTIME.spawn(async move {
+			if let Err(err) = run_session(settings, rx).await {
+				gst::error!(CAT, "session error: {err:#}");
+			}
+		});
 
-		let mut config = moq_native::ClientConfig::default();
-		config.tls.disable_verify = Some(settings.tls_disable_verify);
-
-		drop(settings);
-
-		let origin = moq_lite::Origin::produce();
-		let mut broadcast = moq_lite::Broadcast::produce();
-		let broadcast_consumer = broadcast.consume();
-		let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
-
-		origin.publish_broadcast(&name, broadcast_consumer);
-
-		let client = config.init()?.with_publish(origin.consume());
-
-		RUNTIME.block_on(async {
-			let session = client.connect(url).await.context("failed to connect")?;
-
-			*self.state.lock().unwrap() = Some(State {
-				_session: session,
-				broadcast,
-				catalog,
-				pads: HashMap::new(),
-			});
-
-			anyhow::Ok(())
-		})
+		*self.session.lock().unwrap() = Some(SessionHandle { sender: tx, join });
+		Ok(())
 	}
 
-	fn sink_event(&self, pad: &gst::Pad, event: gst::Event) -> bool {
+	fn stop_session(&self) {
+		if let Some(handle) = self.session.lock().unwrap().take() {
+			handle.stop();
+		}
+	}
+
+	fn forward_buffer(&self, pad: &gst::Pad, buffer: gst::Buffer) -> Result<gst::FlowSuccess, gst::FlowError> {
+		let sender = self
+			.session
+			.lock()
+			.unwrap()
+			.as_ref()
+			.map(|handle| handle.sender.clone())
+			.ok_or(gst::FlowError::Flushing)?;
+
+		let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+		let pts = buffer.pts();
+		let data = Bytes::copy_from_slice(map.as_slice());
+
+		sender
+			.send(ControlMessage::Buffer {
+				pad_name: pad.name().to_string(),
+				data,
+				pts,
+			})
+			.map_err(|_| gst::FlowError::Flushing)?;
+
+		Ok(gst::FlowSuccess::Ok)
+	}
+
+	fn forward_event(&self, pad: &gst::Pad, event: gst::Event) -> bool {
 		match event.view() {
-			gst::EventView::Caps(caps_event) => {
-				let caps = caps_event.caps();
-				if let Err(e) = self.handle_caps(pad, caps) {
-					gst::error!(CAT, obj = pad, "Failed to handle caps: {:?}", e);
+			gst::EventView::Caps(caps) => {
+				let sender = match self
+					.session
+					.lock()
+					.unwrap()
+					.as_ref()
+					.map(|handle| handle.sender.clone())
+				{
+					Some(sender) => sender,
+					None => return false,
+				};
+
+				if sender
+					.send(ControlMessage::SetCaps {
+						pad_name: pad.name().to_string(),
+						caps: caps.caps().to_owned(),
+					})
+					.is_err()
+				{
 					return false;
 				}
+
 				true
 			}
 			_ => gst::Pad::event_default(pad, Some(&*self.obj()), event),
 		}
 	}
+}
 
-	fn handle_caps(&self, pad: &gst::Pad, caps: &gst::CapsRef) -> anyhow::Result<()> {
-		let structure = caps.structure(0).context("empty caps")?;
-		let pad_name = pad.name().to_string();
+async fn run_session(settings: ResolvedSettings, mut rx: mpsc::UnboundedReceiver<ControlMessage>) -> Result<()> {
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(settings.tls_disable_verify);
 
-		let mut state = self.state.lock().unwrap();
-		let state = state.as_mut().context("not connected")?;
+	let client = client_config.init()?;
 
-		let decoder: moq_mux::import::Decoder = match structure.name().as_str() {
-			"video/x-h264" => {
-				let mut buf = bytes::Bytes::new();
-				moq_mux::import::Decoder::new(
-					state.broadcast.clone(),
-					state.catalog.clone(),
-					moq_mux::import::DecoderFormat::Avc3,
-					&mut buf,
-				)?
+	let origin = moq_lite::Origin::produce();
+	let mut broadcast = moq_lite::Broadcast::produce();
+	let broadcast_consumer = broadcast.consume();
+
+	let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
+
+	anyhow::ensure!(
+		origin.publish_broadcast(&settings.broadcast, broadcast_consumer),
+		"failed to publish broadcast {}",
+		settings.broadcast
+	);
+
+	let client = client.with_publish(origin.consume());
+	let session = client.connect(settings.url.clone()).await?;
+
+	let mut runtime = RuntimeState {
+		session,
+		broadcast,
+		catalog,
+		pads: HashMap::new(),
+	};
+
+	while let Some(msg) = rx.recv().await {
+		match msg {
+			ControlMessage::SetCaps { pad_name, caps } => {
+				if let Err(err) = handle_caps(&mut runtime, pad_name, caps) {
+					gst::error!(CAT, "failed to configure pad: {err:#}");
+				}
 			}
-			"video/x-h265" => {
-				let mut buf = bytes::Bytes::new();
-				moq_mux::import::Decoder::new(
-					state.broadcast.clone(),
-					state.catalog.clone(),
-					moq_mux::import::DecoderFormat::Hev1,
-					&mut buf,
-				)?
+			ControlMessage::Buffer { pad_name, data, pts } => {
+				if let Err(err) = handle_buffer(&mut runtime, pad_name, data, pts) {
+					gst::error!(CAT, "failed to publish buffer: {err:#}");
+				}
 			}
-			"video/x-av1" => {
-				let mut buf = bytes::Bytes::new();
-				moq_mux::import::Decoder::new(
-					state.broadcast.clone(),
-					state.catalog.clone(),
-					moq_mux::import::DecoderFormat::Av01,
-					&mut buf,
-				)?
+			ControlMessage::DropPad { pad_name } => {
+				runtime.pads.remove(&pad_name);
 			}
-			"audio/mpeg" => {
-				// aacparse provides AudioSpecificConfig as codec_data in caps
-				let codec_data = structure
-					.get::<gst::Buffer>("codec_data")
-					.context("AAC caps missing codec_data")?;
-				let map = codec_data.map_readable().context("failed to map codec_data buffer")?;
-				let mut data = bytes::Bytes::copy_from_slice(map.as_slice());
-				moq_mux::import::Decoder::new(
-					state.broadcast.clone(),
-					state.catalog.clone(),
-					moq_mux::import::DecoderFormat::Aac,
-					&mut data,
-				)?
-			}
-			"audio/x-opus" => {
-				let channels: i32 = structure.get("channels").unwrap_or(2);
-				let rate: i32 = structure.get("rate").unwrap_or(48000);
-				let config = moq_mux::import::OpusConfig {
-					sample_rate: rate as u32,
-					channel_count: channels as u32,
-				};
-				moq_mux::import::Opus::new(state.broadcast.clone(), state.catalog.clone(), config)?.into()
-			}
-			other => anyhow::bail!("unsupported caps: {}", other),
-		};
-
-		state.pads.insert(
-			pad_name.clone(),
-			PadState {
-				decoder,
-				reference_pts: None,
-			},
-		);
-
-		gst::info!(CAT, obj = pad, "Configured pad {}", pad_name);
-
-		Ok(())
+			ControlMessage::Shutdown => break,
+		}
 	}
 
-	fn sink_chain(&self, pad: &gst::Pad, buffer: gst::Buffer) -> Result<gst::FlowSuccess, gst::FlowError> {
-		let _guard = RUNTIME.enter();
+	Ok(())
+}
 
-		let pad_name = pad.name();
-		let mut state = self.state.lock().unwrap();
-		let state = state.as_mut().ok_or(gst::FlowError::Error)?;
+fn handle_caps(runtime: &mut RuntimeState, pad_name: String, caps: gst::Caps) -> Result<()> {
+	let structure = caps.structure(0).context("empty caps")?;
+	let decoder: moq_mux::import::Decoder = match structure.name().as_str() {
+		"video/x-h264" => {
+			let mut bytes = Bytes::new();
+			new_decoder(runtime, moq_mux::import::DecoderFormat::Avc3, &mut bytes)?
+		}
+		"video/x-h265" => {
+			let mut bytes = Bytes::new();
+			new_decoder(runtime, moq_mux::import::DecoderFormat::Hev1, &mut bytes)?
+		}
+		"video/x-av1" => {
+			let mut bytes = Bytes::new();
+			new_decoder(runtime, moq_mux::import::DecoderFormat::Av01, &mut bytes)?
+		}
+		"audio/mpeg" => {
+			let codec_data = structure
+				.get::<gst::Buffer>("codec_data")
+				.context("AAC caps missing codec_data")?;
+			let map = codec_data.map_readable().context("failed to map codec_data")?;
+			let mut data = Bytes::copy_from_slice(map.as_slice());
+			new_decoder(runtime, moq_mux::import::DecoderFormat::Aac, &mut data)?
+		}
+		"audio/x-opus" => {
+			let channels: i32 = structure.get("channels").unwrap_or(2);
+			let rate: i32 = structure.get("rate").unwrap_or(48_000);
+			let config = moq_mux::import::OpusConfig {
+				sample_rate: rate as u32,
+				channel_count: channels as u32,
+			};
+			moq_mux::import::Opus::new(runtime.broadcast.clone(), runtime.catalog.clone(), config)?.into()
+		}
+		other => anyhow::bail!("unsupported caps: {}", other),
+	};
 
-		let pad_state = state.pads.get_mut(pad_name.as_str()).ok_or_else(|| {
-			gst::error!(CAT, obj = pad, "Pad {} not configured", pad_name);
-			gst::FlowError::Error
-		})?;
+	runtime.pads.insert(
+		pad_name,
+		PadState {
+			decoder,
+			reference_pts: None,
+		},
+	);
+	Ok(())
+}
 
-		// Compute relative PTS in microseconds
-		let pts = buffer.pts().and_then(|pts| {
-			let reference = *pad_state.reference_pts.get_or_insert(pts);
-			let relative = pts.checked_sub(reference)?;
-			hang::container::Timestamp::from_micros(relative.nseconds() / 1000).ok()
-		});
+fn new_decoder(
+	runtime: &mut RuntimeState,
+	format: moq_mux::import::DecoderFormat,
+	buf: &mut Bytes,
+) -> Result<moq_mux::import::Decoder> {
+	let decoder = moq_mux::import::Decoder::new(runtime.broadcast.clone(), runtime.catalog.clone(), format, buf)?;
+	Ok(decoder)
+}
 
-		let data = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
-		let mut bytes = bytes::Bytes::copy_from_slice(data.as_slice());
+fn handle_buffer(
+	runtime: &mut RuntimeState,
+	pad_name: String,
+	mut data: Bytes,
+	pts: Option<gst::ClockTime>,
+) -> Result<()> {
+	let pad = runtime.pads.get_mut(&pad_name).context("pad not configured")?;
 
-		pad_state.decoder.decode_frame(&mut bytes, pts).map_err(|e| {
-			gst::error!(CAT, obj = pad, "Failed to decode: {}", e);
-			gst::FlowError::Error
-		})?;
+	let ts = pts.and_then(|pts| {
+		let reference = *pad.reference_pts.get_or_insert(pts);
+		let relative = pts.checked_sub(reference)?;
+		hang::container::Timestamp::from_micros(relative.nseconds() / 1000).ok()
+	});
 
-		Ok(gst::FlowSuccess::Ok)
-	}
+	pad.decoder.decode_frame(&mut data, ts).map_err(|e| anyhow::anyhow!(e))
 }
